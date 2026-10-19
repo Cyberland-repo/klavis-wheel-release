@@ -4,11 +4,13 @@ This folder documents the adversarial testing of `tasks/wheel-release`. It
 complements the two adversarial (`/cheat`) trials reported in
 [../TRIALS.md](../TRIALS.md):
 
-- **Opus 5.5 `/cheat`:** reward 0. The agent stayed read-only, found no bypass,
-  and its own safety check stopped it early (a weak negative).
-- **gpt-6.1-sol `/cheat`:** recorded but **not counted**. The provider refused the
-  hack-trial prompt on the first turn (`AgentSafetyRefusalError`), so the agent ran
-  no commands and never attempted a bypass.
+- **Claude Code (Anthropic Claude Opus 5.5) `/cheat`:** reward 0. The agent stayed
+  read-only, found no bypass, and its own safety check stopped it early (a weak
+  negative), so the 0 is not strong evidence the task resists cheating.
+- **Codex (OpenAI gpt-6.1-sol) `/cheat`:** recorded but **not counted**. The reward
+  is 0 only because the provider's safety layer refused the hack-trial prompt on the
+  first turn (`AgentSafetyRefusalError`); the agent ran no commands and never
+  attempted a bypass, so the 0 is not evidence the task resists cheating.
 
 Because one cheat trial was a weak negative and the other never ran, the hand
 red-team below is the substantive evidence that the verifier is not trivially
@@ -59,7 +61,7 @@ An earlier round of hand red-team also tried to attack the reward channel direct
 - `e4_tamper_tests` — edits the verifier / test files before they run.
 - `e7_wheel_writes_reward` — has the installed wheel write the reward file itself.
 
-All three scored reward 0 in that earlier round. To be fully honest: those runs
+All three scored reward 0 in that earlier round. One caveat: those runs
 were recorded as **logs only** against an earlier task checksum (2026-10-18); their
 probe solution files were not preserved, so they are **not** re-run here. The
 mechanism they attacked is unchanged in the submitted verifier — `tests/test.sh`

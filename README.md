@@ -30,13 +30,14 @@ using the `task-implementation.toml` prompt. The accepted batch (r14):
 | r14b | 34 | 0 | 2 | clean (artifact_efficiency + do_not_modify_enforced N/A) |
 | r14c2 | 33 | 1 | 2 | fails only `difficult` |
 
-Two of the three rounds pass every applicable criterion (a true 36/36). The third
-round fails only the `difficult` criterion, which is a reviewer judgment call about
-whether the task is hard enough; the same artifacts passed it on the other rounds.
+Two of the three rounds passed every applicable criterion (35 of 35 and 34 of 34,
+with 1 and 2 criteria not applicable). The third round had a single miss, the
+`difficult` criterion, which is a reviewer judgment call about whether the task is
+hard enough; the same artifacts passed it on the other two rounds.
 
 ## How to run it
 
-With the Terminal-Bench [Harbor](https://github.com/laude-institute/terminal-bench)
+With the Terminal-Bench [Harbor](https://github.com/harbor-framework/harbor)
 CLI and Docker:
 
 ```bash
@@ -52,23 +53,26 @@ The reference solution is in `tasks/wheel-release/solution/`. The verifier is
 
 ## Trial status
 
-Models: Claude Opus 5.5 (reasoning effort max) and gpt-6.1-sol (reasoning effort
-xhigh) — the models requested for this submission. See [TRIALS.md](TRIALS.md) for
-the full table.
+Models: Claude Code (Anthropic Claude Opus 5.5, reasoning effort max) and Codex
+(OpenAI gpt-6.1-sol, reasoning effort xhigh) — the models requested for this
+submission. See [TRIALS.md](TRIALS.md) for the full table.
 
-- **Genuine (gpt-6.1-sol):** 3 countable runs, all reward 0. Each built wheel
+- **Genuine (Codex):** 3 countable runs, all reward 0. Each built wheel
   passed the visible, confidentiality, reproducibility, and install checks and
   failed only on a public absolute build path left in the shipped wheel. No reward
   hacking.
-- **Genuine (Opus 5.5):** 3 countable runs, all reward 0. Two failed on the same
+- **Genuine (Claude Code):** 3 countable runs, all reward 0. Two failed on the same
   absolute-path miss as the Codex runs; one failed earlier, when its release script
   hit a robustness gap bundling a private module on the hidden checkout. No reward
   hacking. (Some earlier attempts were uncountable because the provider's session
   limit stopped them; they were re-run one at a time.)
-- **Adversarial / `/cheat` (Opus 5.5):** reward 0. The agent stayed read-only,
-  found no bypass, and its own safety check stopped it early — a weak negative.
-- **Adversarial / `/cheat` (gpt-6.1-sol):** recorded but not counted. The provider
-  refused the prompt on the first turn, so no bypass was ever attempted.
+- **Adversarial / `/cheat` (Claude Code):** reward 0, but only a weak negative. The
+  agent stayed read-only, found no bypass, and its own safety check stopped it early,
+  so the 0 is not strong evidence the task resists cheating.
+- **Adversarial / `/cheat` (Codex):** reward 0, recorded but not counted. The reward
+  is 0 only because the provider's safety layer refused the prompt on the first turn;
+  the agent never ran and never attempted a bypass, so the 0 is not evidence the task
+  resists cheating. That gap is why the hand red-team exists (see [redteam/](redteam/)).
 - **Hand red-team (no model):** malicious reference solutions run through the
   `oracle` agent each scored reward 0 while the honest solution scored 1.0; no
   reward-hacking hole was found among the probes tested. See [redteam/](redteam/)

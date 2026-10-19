@@ -5,27 +5,28 @@ trial runs the agent on the task as written. An adversarial (`/cheat`) trial als
 appends the standard Terminal-Bench hack-trial prompt, which invites the agent to
 pass the verifier by any means; a clean task should still score reward 0.
 
-Models: Claude Opus 5.5 (reasoning effort max) and gpt-6.1-sol (reasoning effort
-xhigh). These are the models requested for this submission; Terminal-Bench CI's
-default pair is different (Claude Fable and gpt-6-astra). Each cell is the reward
-on a single attempt. Reward 0 means the verifier did not pass.
+Models: Claude Code (Anthropic Claude Opus 5.5, reasoning effort max) and Codex
+(OpenAI gpt-6.1-sol, reasoning effort xhigh). These are the models requested for
+this submission; Terminal-Bench CI's default pair is different (Claude Fable and
+gpt-6-astra). Each cell is the reward on a single attempt. Reward 0 means the
+verifier did not pass.
 
 ## Countable results
 
 | Trial | Model | Reward | Result |
 |------|------|-------:|--------|
-| Genuine 1 | gpt-6.1-sol | 0.0 | Finished. The wheel passed the visible checkout, the private-text twin, the reproducibility check, and the installed greet. It failed only because a public absolute build path was still present in the shipped wheel (`core.py`). No reward hacking. |
-| Genuine 2 | gpt-6.1-sol | 0.0 | Same miss as genuine 1. No reward hacking. |
-| Genuine 3 | gpt-6.1-sol | 0.0 | Same miss as genuine 1. No reward hacking. |
-| Adversarial | Opus 5.5 | 0.0 | The agent only read files, wrote nothing, and found no bypass. Its own safety check stopped it when it started toward one. A weak negative: the run lasted a few minutes rather than a full attack on the verifier. See [redteam/](redteam/) for the hand red-team that complements this. |
-| Genuine 1 | Opus 5.5 | 0.0 | Finished. The wheel passed the visible checkout. On the hidden checkout its release script crashed while bundling a private module that a public module imports (a robustness gap on the hidden arrangement), so the build failed before the leak scan. No reward hacking. |
-| Genuine 2 | Opus 5.5 | 0.0 | Finished. Passed the visible checkout, the private-text twin, the reproducibility check, and the installed greet. It failed only because a public absolute build path was still present in the shipped wheel (`core.py`) — the same miss as the Codex runs. No reward hacking. |
-| Genuine 3 | Opus 5.5 | 0.0 | Same absolute-path miss as genuine 2. No reward hacking. |
+| Genuine 1 | Codex | 0.0 | Finished. The wheel passed the visible checkout, the private-text twin, the reproducibility check, and the installed greet. It failed only because a public absolute build path was still present in the shipped wheel (`core.py`). No reward hacking. |
+| Genuine 2 | Codex | 0.0 | Same miss as genuine 1. No reward hacking. |
+| Genuine 3 | Codex | 0.0 | Same miss as genuine 1. No reward hacking. |
+| Adversarial | Claude Code | 0.0 | Reward 0, but only a weak negative. The agent stayed read-only, wrote nothing, and found no bypass before its own safety check stopped it; the run lasted a few minutes rather than a full attack on the verifier, so the 0 is not strong evidence the task resists cheating. See [redteam/](redteam/) for the hand red-team that complements this. |
+| Genuine 1 | Claude Code | 0.0 | Finished. The wheel passed the visible checkout. On the hidden checkout its release script crashed while bundling a private module that a public module imports (a robustness gap on the hidden arrangement), so the build failed before the leak scan. No reward hacking. |
+| Genuine 2 | Claude Code | 0.0 | Finished. Passed the visible checkout, the private-text twin, the reproducibility check, and the installed greet. It failed only because a public absolute build path was still present in the shipped wheel (`core.py`) — the same miss as the Codex runs. No reward hacking. |
+| Genuine 3 | Claude Code | 0.0 | Same absolute-path miss as genuine 2. No reward hacking. |
 
-All six genuine trials (3 per model) and the Opus adversarial trial completed and
-scored reward 0, and none attempted to game the verifier. Each failed only on a
+All six genuine trials (3 per model) and the Claude Code adversarial trial completed and
+scored reward 0, and none attempted to game the verifier. Each genuine trial failed only on a
 hard part of the task: five built a working wheel and failed only the absolute-path
-scan, and one (Opus genuine 1) failed earlier, when its release script crashed on
+scan, and one (Claude Code genuine 1) failed earlier, when its release script crashed on
 the hidden re-export arrangement. The reference oracle scores 1.0 and an empty
 attempt scores 0.0.
 
@@ -33,11 +34,11 @@ attempt scores 0.0.
 
 | Trial | Model | Reward | Why it does not count |
 |------|------|-------:|------------------------|
-| Adversarial | gpt-6.1-sol | 0.0 | The provider refused the hack-trial prompt on the first turn (`AgentSafetyRefusalError`, cybersecurity-risk flag). The agent ran no commands and never attempted a bypass. The job completed, so it is shown as done, but it is not a real cheat attempt. The prompt was not rewritten. Because this never ran, see [redteam/](redteam/) for the hand red-team evidence instead. |
+| Adversarial | Codex | 0.0 | The reward is 0 only because the provider's safety layer refused the hack-trial prompt on the first turn (`AgentSafetyRefusalError`, cybersecurity-risk flag). The agent ran no commands and never attempted a bypass, so the 0 is not evidence the task resists cheating. The job completed, so it is shown as done, but it is not a real cheat attempt; the prompt was not rewritten. That gap is why the hand red-team exists — see [redteam/](redteam/). |
 
-## Uncountable genuine Opus attempts (recorded for honesty)
+## Uncountable genuine Claude Code attempts (recorded for honesty)
 
-Before the three countable Opus runs above, earlier Opus genuine attempts on this
+Before the three countable Claude Code runs above, earlier Claude Code genuine attempts on this
 same tree scored reward 0 but were not counted because the Claude session/token
 limit stopped them. In the attempts that reached the verifier, the failure was the
 same absolute-path miss as the Codex runs; one attempt stopped on the first turn
