@@ -53,26 +53,28 @@ The reference solution is in `tasks/wheel-release/solution/`. The verifier is
 
 ## Trial status
 
-Models: Claude Code (Anthropic Claude Opus 5.5, reasoning effort max) and Codex
-(OpenAI gpt-6.1-sol, reasoning effort xhigh) — the models requested for this
-submission. See [TRIALS.md](TRIALS.md) for the full table.
+Models: Claude Opus 5.5 (reasoning effort max) and gpt-6.1-sol (reasoning effort
+xhigh) — the models requested for this submission. See [TRIALS.md](TRIALS.md) for
+the full table.
 
-- **Genuine (Codex):** 3 countable runs, all reward 0. Each built wheel
+- **Genuine (gpt-6.1-sol):** 3 countable runs, all reward 0. Each built wheel
   passed the visible, confidentiality, reproducibility, and install checks and
   failed only on a public absolute build path left in the shipped wheel. No reward
   hacking.
-- **Genuine (Claude Code):** 3 countable runs, all reward 0. Two failed on the same
+- **Genuine (Opus 5.5):** 3 countable runs, all reward 0. Two failed on the same
   absolute-path miss as the Codex runs; one failed earlier, when its release script
   hit a robustness gap bundling a private module on the hidden checkout. No reward
   hacking. (Some earlier attempts were uncountable because the provider's session
   limit stopped them; they were re-run one at a time.)
-- **Adversarial / `/cheat` (Claude Code):** reward 0, but only a weak negative. The
-  agent stayed read-only, found no bypass, and its own safety check stopped it early,
-  so the 0 is not strong evidence the task resists cheating.
-- **Adversarial / `/cheat` (Codex):** reward 0, recorded but not counted. The reward
-  is 0 only because the provider's safety layer refused the prompt on the first turn;
-  the agent never ran and never attempted a bypass, so the 0 is not evidence the task
-  resists cheating. That gap is why the hand red-team exists (see [redteam/](redteam/)).
+- **Adversarial / `/cheat` (Opus 5.5):** reward 0. This is a real, counted cheat
+  trial: the agent ran and attempted it, doing read-only recon for a way to game the
+  grader, and found nothing exploitable. Claude's safety layer pushed back several
+  times along the way, so it is a somewhat weaker negative than a full attack, but it
+  did run.
+- **Adversarial / `/cheat` (gpt-6.1-sol):** reward 0, recorded but not counted. The
+  reward is 0 only because the provider's safety layer refused the prompt on the first
+  turn; the agent never ran and never attempted a bypass, so this 0 is not evidence the
+  task resists cheating. That gap is why the hand red-team exists (see [redteam/](redteam/)).
 - **Hand red-team (no model):** malicious reference solutions run through the
   `oracle` agent each scored reward 0 while the honest solution scored 1.0; no
   reward-hacking hole was found among the probes tested. See [redteam/](redteam/)

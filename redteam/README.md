@@ -4,13 +4,14 @@ This folder documents the adversarial testing of `tasks/wheel-release`. It
 complements the two adversarial (`/cheat`) trials reported in
 [../TRIALS.md](../TRIALS.md):
 
-- **Claude Code (Anthropic Claude Opus 5.5) `/cheat`:** reward 0. The agent stayed
-  read-only, found no bypass, and its own safety check stopped it early (a weak
-  negative), so the 0 is not strong evidence the task resists cheating.
-- **Codex (OpenAI gpt-6.1-sol) `/cheat`:** recorded but **not counted**. The reward
-  is 0 only because the provider's safety layer refused the hack-trial prompt on the
-  first turn (`AgentSafetyRefusalError`); the agent ran no commands and never
-  attempted a bypass, so the 0 is not evidence the task resists cheating.
+- **Opus 5.5 `/cheat`:** reward 0, a real counted cheat trial. The agent ran and
+  attempted it with read-only recon, found no bypass, and scored 0; Claude's safety
+  layer pushed back several times, so it is a somewhat weaker negative than a full
+  attack.
+- **gpt-6.1-sol `/cheat`:** recorded but **not counted**. The reward is 0 only
+  because the provider's safety layer refused the hack-trial prompt on the first turn
+  (`AgentSafetyRefusalError`); the agent ran no commands and never attempted a bypass,
+  so this 0 is not evidence the task resists cheating.
 
 Because one cheat trial was a weak negative and the other never ran, the hand
 red-team below is the substantive evidence that the verifier is not trivially
