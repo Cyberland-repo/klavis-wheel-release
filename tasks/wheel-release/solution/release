@@ -1,0 +1,567 @@
+#!/usr/bin/env python3
+"""Release a checkout as a wheel.
+
+The checkout's ``visibility.toml`` lists the public modules (which ship) and the private
+modules (whose source, names, docstrings and secrets must not ship). Where a public module
+depends on private code, the release resolves that dependency across the package's import
+graph -- absolute and relative imports, ``import a.b.c as x``, ``from pkg import module``
+with attribute access, star imports bounded by ``__all__``, function-local (deferred)
+imports, and ``if TYPE_CHECKING`` blocks that must be dropped -- gathers the transitive
+closure of private definitions actually reachable, inlines them in dependency order with
+their module references rewritten to plain names, and compiles the module to bytecode so no
+private source travels. Unused private text (docstrings, comments, secrets) is dropped.
+Declared console scripts are preserved as wheel entry points. Builds are reproducible.
+"""
+
+import ast
+import base64
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import marshal
+import os
+import sys
+import time
+import tomllib
+import zipfile
+from pathlib import Path
+
+
+def _module_name(rel: str) -> str:
+    rel = rel[:-3] if rel.endswith(".py") else rel
+    parts = rel.split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _resolve(pkg_parts: list[str], level: int, module: str | None) -> str:
+    """Resolve a (possibly relative) import to an absolute dotted base."""
+    if level == 0:
+        return module or ""
+    base = pkg_parts[: len(pkg_parts) - (level - 1)]
+    parts = list(base) + (module.split(".") if module else [])
+    return ".".join(parts)
+
+
+class _DropAbsolute(ast.NodeTransformer):
+    """Drop module-level assignments of absolute-path string constants."""
+
+    def visit_Assign(self, node: ast.Assign):
+        if (
+            len(node.targets) == 1
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and node.value.value.startswith("/")
+        ):
+            return None
+        return node
+
+
+class _Mod:
+    """One module's definitions and its import bindings, classified against the private set."""
+
+    def __init__(self, dotted: str, src: str, private: set[str], is_package: bool = False) -> None:
+        self.dotted = dotted
+        # A package __init__ anchors its own relative imports on the package itself, so its pkg is the
+        # full dotted path; a regular module anchors on its parent package.
+        _parts = dotted.split(".") if dotted else []
+        self.pkg = _parts if is_package else _parts[:-1]
+        self.tree = ast.parse(src)
+        self.defs: dict[str, ast.AST] = {}
+        self.consts: dict[str, ast.Assign] = {}
+        self.all: list[str] | None = None
+        self.name_binds: dict[str, tuple[str, str]] = {}   # local -> (module, orig name)
+        self.module_binds: dict[str, str] = {}             # local -> private module
+        self.star: list[str] = []                          # private modules star-imported
+        self.stdlib: dict[str, ast.AST] = {}               # bound name -> import node (non-private)
+        for node in self.tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                self.defs[node.name] = node
+            elif isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name):
+                        self.consts[t.id] = node
+                        if t.id == "__all__" and isinstance(node.value, (ast.List, ast.Tuple)):
+                            self.all = [e.value for e in node.value.elts
+                                        if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+        for node in ast.walk(self.tree):
+            self._classify(node, private)
+
+    def _classify(self, node: ast.AST, private: set[str]) -> None:
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve(self.pkg, node.level, node.module)
+            if node.names and node.names[0].name == "*":
+                if base in private:
+                    self.star.append(base)
+                return
+            for a in node.names:
+                full = f"{base}.{a.name}" if base else a.name
+                local = a.asname or a.name
+                if full in private:
+                    self.module_binds[local] = full
+                elif base in private:
+                    self.name_binds[local] = (base, a.name)
+                else:
+                    self.stdlib[local] = node
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in private:
+                    self.module_binds[a.asname or a.name] = a.name
+                else:
+                    self.stdlib[(a.asname or a.name).split(".")[0]] = node
+
+
+class _Index:
+    def __init__(self, root: Path, private_rels: list[str]) -> None:
+        self.private = {_module_name(r) for r in private_rels if (root / r).is_file()}
+        self.modules: dict[str, _Mod] = {}
+        for rel in private_rels:
+            if (root / rel).is_file():
+                dotted = _module_name(rel)
+                self.modules[dotted] = _Mod(dotted, (root / rel).read_text(), self.private,
+                                            is_package=rel.endswith("__init__.py"))
+
+    def exported(self, module: str) -> list[str]:
+        # Deterministic order: a set iterated in hash-seed order would make a multi-name star
+        # re-export emit names in a varying order and break reproducible builds.
+        mod = self.modules[module]
+        if mod.all is not None:
+            return list(mod.all)
+        return sorted(n for n in set(mod.defs) | set(mod.consts) if not n.startswith("_"))
+
+
+def _local_binds(mod: _Mod, node: ast.AST, private: set[str]):
+    """Import bindings introduced inside a node (function-local / deferred imports)."""
+    name_binds, module_binds, star = {}, {}, []
+    for n in ast.walk(node):
+        if isinstance(n, ast.ImportFrom):
+            base = _resolve(mod.pkg, n.level, n.module)
+            if n.names and n.names[0].name == "*":
+                if base in private:
+                    star.append(base)
+                continue
+            for a in n.names:
+                full = f"{base}.{a.name}" if base else a.name
+                local = a.asname or a.name
+                if full in private:
+                    module_binds[local] = full
+                elif base in private:
+                    name_binds[local] = (base, a.name)
+        elif isinstance(n, ast.Import):
+            for a in n.names:
+                if a.name in private:
+                    module_binds[a.asname or a.name] = a.name
+    return name_binds, module_binds, star
+
+
+def _refs(index: _Index, mod: _Mod, node: ast.AST):
+    """Private (module, name) references and stdlib import nodes used by ``node`` in ``mod``."""
+    lname, lmod, lstar = _local_binds(mod, node, index.private)
+
+    def module_bind(name):
+        return lmod.get(name) or mod.module_binds.get(name)
+
+    def name_bind(name):
+        return lname.get(name) or mod.name_binds.get(name)
+
+    priv_refs: list[tuple[str, str]] = []
+    stdlib: list[ast.AST] = []
+
+    def add_ref(r):
+        if r not in priv_refs:
+            priv_refs.append(r)
+
+    def add_std(n):
+        if n not in stdlib:
+            stdlib.append(n)
+
+    stars = list(mod.star) + lstar
+    for n in ast.walk(node):
+        if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            target = module_bind(n.value.id)
+            if target and target in index.private:
+                add_ref((target, n.attr))
+            elif n.value.id in mod.stdlib:
+                add_std(mod.stdlib[n.value.id])
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+            x = n.id
+            nb = name_bind(x)
+            if nb and nb[0] in index.private:
+                add_ref(nb)
+            elif x in mod.defs or x in mod.consts:
+                add_ref((mod.dotted, x))
+            elif x in mod.stdlib:
+                add_std(mod.stdlib[x])
+            else:
+                for st in stars:
+                    if x in index.exported(st):
+                        add_ref((st, x))
+                        break
+    return priv_refs, stdlib
+
+
+def _closure(index: _Index, mod: _Mod, node: ast.AST, extra_seeds=()):
+    needed: list[tuple[str, str, ast.AST]] = []
+    seen: set[tuple[str, str]] = set()
+    stdlib: list[ast.AST] = []
+    seeds, seed_stdlib = _refs(index, mod, node)
+    for s in seed_stdlib:
+        if s not in stdlib:
+            stdlib.append(s)
+    seeds = list(seeds)
+    for s in extra_seeds:
+        if s not in seeds:
+            seeds.append(s)
+    queue = list(seeds)
+    while queue:
+        key = queue.pop(0)
+        if key in seen:
+            continue
+        m = index.modules.get(key[0])
+        if m is None:
+            continue
+        defn = m.defs.get(key[1]) or m.consts.get(key[1])
+        if defn is None:
+            continue
+        seen.add(key)
+        needed.append((key[0], key[1], defn))
+        refs, more = _refs(index, m, defn)
+        for s in more:
+            if s not in stdlib:
+                stdlib.append(s)
+        for r in refs:
+            if r not in seen:
+                queue.append(r)
+    return needed, stdlib
+
+
+class _Rewrite(ast.NodeTransformer):
+    """Strip private imports and TYPE_CHECKING blocks; rewrite private module-attribute,
+    aliased-name, deferred-import, star and same-module references to the fresh, unique
+    inlined-definition names carried in ``rename``.
+
+    ``rename`` maps a reachable ``(module, name)`` private definition to the unique name it
+    is emitted under, so two private modules that both define ``value`` never collide."""
+
+    def __init__(self, index: "_Index", mod: "_Mod", rename: dict) -> None:
+        self.index = index
+        self.mod = mod
+        self.rename = rename
+        self.local_nb: dict[str, tuple[str, str]] = {}
+        self.local_mb: dict[str, str] = {}
+        self.local_star: list[str] = []
+        self.local_names: set[str] = set()
+
+    def rewrite(self, node):
+        """Entry point: flatten this node's deferred (function-local) import bindings and the
+        names bound locally within it, then rewrite. Flattening matches ``_refs``/``_closure``,
+        which also walk the whole node, so the rename is applied at exactly the load sites the
+        closure resolved."""
+        self.local_nb, self.local_mb, self.local_star = _local_binds(
+            self.mod, node, self.index.private)
+        self.local_names = _flat_local_names(node)
+        return self.visit(node)
+
+    def _name_bind(self, name):
+        return self.local_nb.get(name) or self.mod.name_binds.get(name)
+
+    def _module_bind(self, name):
+        return self.local_mb.get(name) or self.mod.module_binds.get(name)
+
+    def _stars(self):
+        return list(self.mod.star) + list(self.local_star)
+
+    def _fresh(self, key, fallback):
+        return self.rename.get(key, fallback)
+
+    def _is_private_import(self, node) -> bool:
+        if isinstance(node, ast.ImportFrom):
+            base = _resolve(self.mod.pkg, node.level, node.module)
+            if node.names and node.names[0].name == "*":
+                return base in self.index.private
+            return base in self.index.private or any(
+                (f"{base}.{a.name}" if base else a.name) in self.index.private for a in node.names)
+        if isinstance(node, ast.Import):
+            return any(a.name in self.index.private for a in node.names)
+        return False
+
+    def visit_Import(self, node):
+        return None if self._is_private_import(node) else node
+
+    def visit_ImportFrom(self, node):
+        return None if self._is_private_import(node) else node
+
+    def visit_If(self, node):
+        test = node.test
+        is_tc = (isinstance(test, ast.Name) and test.id == "TYPE_CHECKING") or (
+            isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING")
+        if is_tc:
+            return [self.visit(n) for n in node.orelse]
+        self.generic_visit(node)
+        return node
+
+    def visit_Attribute(self, node):
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name):
+            target = self._module_bind(node.value.id)
+            if target and target in self.index.private:
+                newid = self._fresh((target, node.attr), node.attr)
+                return ast.copy_location(ast.Name(id=newid, ctx=node.ctx), node)
+        return node
+
+    def visit_Name(self, node):
+        if not isinstance(node.ctx, ast.Load):
+            return node
+        x = node.id
+        nb = self._name_bind(x)
+        if nb and nb[0] in self.index.private:
+            newid = self._fresh(nb, nb[1])
+            return ast.copy_location(ast.Name(id=newid, ctx=node.ctx), node)
+        # a name bound as a local variable (param / assignment) shadows a same-module
+        # definition or a star import, so it must not be rewritten
+        if x in self.local_names:
+            return node
+        if (x in self.mod.defs or x in self.mod.consts) and (self.mod.dotted, x) in self.rename:
+            return ast.copy_location(
+                ast.Name(id=self.rename[(self.mod.dotted, x)], ctx=node.ctx), node)
+        for st in self._stars():
+            if x in self.index.exported(st):
+                newid = self._fresh((st, x), x)
+                return ast.copy_location(ast.Name(id=newid, ctx=node.ctx), node)
+        return node
+
+
+def _flat_local_names(node: ast.AST) -> set[str]:
+    """Names bound as locals anywhere inside ``node`` (function params and assignment
+    targets). Used only to avoid rewriting a local that shadows a same-module definition or
+    a star import; import-mediated binds are resolved before this is consulted."""
+    names: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = n.args
+            for arg in list(a.posonlyargs) + list(a.args) + list(a.kwonlyargs):
+                names.add(arg.arg)
+            if a.vararg:
+                names.add(a.vararg.arg)
+            if a.kwarg:
+                names.add(a.kwarg.arg)
+        elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+    return names
+
+
+def _def_time_deps(node: ast.AST, pool: set[str]) -> set[str]:
+    srcs: list[ast.AST] = list(getattr(node, "decorator_list", []))
+    if isinstance(node, ast.ClassDef):
+        srcs += list(node.bases) + list(node.keywords)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        srcs += [d for d in node.args.defaults if d is not None]
+        srcs += [d for d in node.args.kw_defaults if d is not None]
+    deps: set[str] = set()
+    for src in srcs:
+        deps |= {n.id for n in ast.walk(src) if isinstance(n, ast.Name) and n.id in pool}
+    return deps
+
+
+def _topo(defs: dict[str, ast.AST]) -> list[ast.AST]:
+    pool = set(defs)
+    pending = dict(defs)
+    ordered: list[ast.AST] = []
+    placed: set[str] = set()
+    while pending:
+        progressed = False
+        for name in list(pending):
+            if _def_time_deps(pending[name], pool) <= placed:
+                ordered.append(pending.pop(name))
+                placed.add(name)
+                progressed = True
+        if not progressed:
+            ordered.extend(pending.values())
+            break
+    return ordered
+
+
+def _dedupe_imports(nodes: list[ast.AST]) -> list[ast.AST]:
+    seen, out = set(), []
+    for n in nodes:
+        key = ast.dump(n)
+        if key not in seen:
+            seen.add(key)
+            out.append(n)
+    return out
+
+
+def _reserved_names(pub: "_Mod", needed, index: "_Index") -> set[str]:
+    """Every identifier that already appears in the emitted module, so a fresh ``_n<i>`` name
+    can never collide with a public def, a surviving import binding, a parameter, or any name
+    the reviewer happened to spell in a generated module."""
+    res: set[str] = set()
+    trees = [pub.tree] + [node for _, _, node in needed]
+    for t in trees:
+        for n in ast.walk(t):
+            if isinstance(n, ast.Name):
+                res.add(n.id)
+            elif isinstance(n, ast.arg):
+                res.add(n.arg)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                res.add(n.name)
+            elif isinstance(n, ast.Attribute):
+                res.add(n.attr)
+            elif isinstance(n, ast.alias):
+                res.add((n.asname or n.name).split(".")[0])
+                res.add(n.name.split(".")[-1])
+    return res
+
+
+def _allocate_renames(index: "_Index", pub: "_Mod", needed, reexport_locals=()) -> dict:
+    """Assign each reachable private ``(module, name)`` a fresh unique emitted name.
+
+    Keyed only on the private module's position in ``visibility.toml`` and the definition's
+    own name -- never on docstrings, comments, secrets or paths -- so a twin checkout whose
+    private-only text differs produces byte-identical output. Two modules defining the same
+    name therefore get distinct names instead of silently merging."""
+    order = {dotted: i for i, dotted in enumerate(index.modules)}
+    keys = sorted({(m, n) for m, n, _ in needed}, key=lambda k: (order[k[0]], k[1]))
+    reserved = _reserved_names(pub, needed, index) | set(reexport_locals)
+    rename: dict = {}
+    counter = 0
+    for k in keys:
+        while True:
+            cand = f"_n{counter}"
+            counter += 1
+            if cand not in reserved:
+                break
+        rename[k] = cand
+    return rename
+
+
+def _reexports(index: "_Index", pub: "_Mod") -> dict:
+    """Module-level names a public module re-exports from private modules: ``from <priv> import name
+    [as local]`` and ``from <priv> import *`` bounded by the target's ``__all__``. Each becomes an
+    attribute of the shipped public module even when the module body never loads it, so the private
+    definition has to be inlined and the public name bound to it. Whole private-module object
+    re-exports (``from pkg import privatemodule``) are skipped because the module file does not ship,
+    and an unbounded ``import *`` (no ``__all__``) is skipped so a re-export never pulls in a body the
+    confidentiality twin would treat as unused. Only top-level imports count; deferred and
+    ``if TYPE_CHECKING:`` imports create no runtime attribute."""
+    out: dict = {}
+    for node in pub.tree.body:
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        base = _resolve(pub.pkg, node.level, node.module)
+        if node.names and node.names[0].name == "*":
+            if base in index.private and index.modules[base].all is not None:
+                for nm in index.exported(base):
+                    out[nm] = (base, nm)
+            continue
+        for a in node.names:
+            full = f"{base}.{a.name}" if base else a.name
+            if full in index.private:
+                continue
+            if base in index.private:
+                out[a.asname or a.name] = (base, a.name)
+    return out
+
+
+def _transform_public(index: "_Index", rel: str, src: str) -> tuple[str, bool]:
+    dotted = _module_name(rel)
+    pub = _Mod(dotted, src, index.private, is_package=rel.endswith("__init__.py"))
+    reexports = _reexports(index, pub)
+    needed, stdlib = _closure(index, pub, pub.tree, extra_seeds=list(reexports.values()))
+    if not needed:
+        tree = _DropAbsolute().visit(_Rewrite(index, pub, {}).rewrite(ast.parse(src)))
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree) + "\n", False
+
+    rename = _allocate_renames(index, pub, needed, reexports.keys())
+
+    const_nodes, def_nodes = [], {}
+    for mod, name, node in needed:
+        rewritten = _Rewrite(index, index.modules[mod], rename).rewrite(copy.deepcopy(node))
+        fresh = rename[(mod, name)]
+        if isinstance(node, ast.Assign):
+            for t in rewritten.targets:
+                if isinstance(t, ast.Name):
+                    t.id = fresh
+            const_nodes.append(rewritten)
+        else:
+            rewritten.name = fresh
+            def_nodes[fresh] = rewritten
+
+    reexport_binds = []
+    for _local, _key in reexports.items():
+        _fresh = rename.get(_key)
+        if _fresh is not None and _local != _fresh:
+            reexport_binds.append(ast.Assign(
+                targets=[ast.Name(id=_local, ctx=ast.Store())],
+                value=ast.Name(id=_fresh, ctx=ast.Load())))
+
+    pub_tree = _Rewrite(index, pub, rename).rewrite(ast.parse(src))
+    pub_imports = [n for n in pub_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
+    pub_rest = [n for n in pub_tree.body if not isinstance(n, (ast.Import, ast.ImportFrom))]
+
+    imports = _dedupe_imports(stdlib + pub_imports)
+    body = [*imports, *const_nodes, *_topo(def_nodes), *reexport_binds, *pub_rest]
+    module = _DropAbsolute().visit(ast.Module(body=body, type_ignores=[]))
+    ast.fix_missing_locations(module)
+    return ast.unparse(module) + "\n", True
+
+
+def _pyc(source: str, rel: str) -> bytes:
+    code = compile(source, rel, "exec", optimize=2)
+    return importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code)
+
+
+def _digest(data: bytes) -> str:
+    return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+
+
+def _pack(members: dict[str, bytes], extra: dict[str, bytes]) -> bytes:
+    dist_info = "app-0.1.0.dist-info"
+    payload = dict(members)
+    payload.update(extra)
+    payload[f"{dist_info}/METADATA"] = b"Metadata-Version: 2.1\nName: app\nVersion: 0.1.0\n"
+    payload[f"{dist_info}/WHEEL"] = (
+        b"Wheel-Version: 1.0\nGenerator: release\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    )
+    record = [f"{name},{_digest(data)},{len(data)}" for name, data in sorted(payload.items())]
+    record.append(f"{dist_info}/RECORD,,")
+    payload[f"{dist_info}/RECORD"] = ("\n".join(record) + "\n").encode()
+    buf = io.BytesIO()
+    date_time = time.gmtime(int(os.environ.get("SOURCE_DATE_EPOCH", "315532800")))[:6]
+    with zipfile.ZipFile(buf, "w") as archive:
+        for name, data in payload.items():
+            info = zipfile.ZipInfo(name, date_time=date_time)
+            info.external_attr = (0o644 & 0xFFFF) << 16
+            info.create_system = 3
+            archive.writestr(info, data)
+    return buf.getvalue()
+
+
+def main() -> None:
+    root = Path(sys.argv[1]).resolve()
+    visibility = tomllib.loads((root / "visibility.toml").read_text())
+    index = _Index(root, visibility["private"])
+    members: dict[str, bytes] = {}
+    for rel in visibility["public"]:
+        source, inlined = _transform_public(index, rel, (root / rel).read_text())
+        if inlined:
+            members[rel[:-3] + ".pyc"] = _pyc(source, rel)
+        else:
+            members[rel] = source.encode()
+    extra: dict[str, bytes] = {}
+    scripts = visibility.get("scripts", {})
+    if scripts:
+        lines = ["[console_scripts]"] + [f"{k} = {v}" for k, v in scripts.items()]
+        extra["app-0.1.0.dist-info/entry_points.txt"] = ("\n".join(lines) + "\n").encode()
+    dist = root / "dist"
+    dist.mkdir(exist_ok=True)
+    (dist / "app-0.1.0-py3-none-any.whl").write_bytes(_pack(members, extra))
+    (dist / "RELEASE.json").write_text(json.dumps({"builtFrom": "."}) + "\n")
+
+
+if __name__ == "__main__":
+    main()

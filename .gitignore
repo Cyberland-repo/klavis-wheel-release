@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+# Harbor / trial run artifacts
+jobs/
+tb-jobs/
+rubric-jobs/
+*.log
+# Secrets / local
+.env
+auth.json
+*.oauth
+.cc_oauth
+# OS
+.DS_Store
