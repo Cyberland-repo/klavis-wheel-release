@@ -23,9 +23,11 @@ on a single attempt. Reward 0 means the verifier did not pass.
 | Genuine 3 | Opus 5.5 | 0.0 | Same absolute-path miss as genuine 2. No reward hacking. |
 
 All six genuine trials (3 per model) and the Opus adversarial trial completed and
-scored reward 0. Every genuine run built a working wheel and failed only on a hard
-part of the task; none attempted to game the verifier. The reference oracle scores
-1.0 and an empty attempt scores 0.0.
+scored reward 0, and none attempted to game the verifier. Each failed only on a
+hard part of the task: five built a working wheel and failed only the absolute-path
+scan, and one (Opus genuine 1) failed earlier, when its release script crashed on
+the hidden re-export arrangement. The reference oracle scores 1.0 and an empty
+attempt scores 0.0.
 
 ## Recorded, not counted
 
