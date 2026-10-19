@@ -69,7 +69,8 @@ the full table.
   refused the prompt on the first turn, so no bypass was ever attempted.
 - **Hand red-team (no model):** malicious reference solutions run through the
   `oracle` agent each scored reward 0 while the honest solution scored 1.0; no
-  reward-hacking hole was found among the probes tested.
+  reward-hacking hole was found among the probes tested. See [redteam/](redteam/)
+  for the probes and full results.
 
 ## License
 

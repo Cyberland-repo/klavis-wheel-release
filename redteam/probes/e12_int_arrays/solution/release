@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Release a checkout: keep private behavior, drop private source and names."""
+
+import ast
+import base64
+import hashlib
+import importlib.util
+import io
+import json
+import marshal
+import sys
+import tomllib
+import zipfile
+from pathlib import Path
+
+
+def _inline(tree: ast.AST, private: dict[str, str]) -> tuple[ast.AST, bool]:
+    """Replace each import of a private module with that module's functions."""
+    body: list[ast.stmt] = []
+    inlined = False
+    for node in tree.body:  # type: ignore[attr-defined]
+        if isinstance(node, ast.ImportFrom) and node.module in private:
+            body.extend(
+                fn for fn in ast.parse(private[node.module]).body if isinstance(fn, ast.FunctionDef)
+            )
+            inlined = True
+            continue
+        body.append(node)
+    tree.body = body  # type: ignore[attr-defined]
+    return tree, inlined
+
+
+def _pyc(source: str, rel: str) -> bytes:
+    """Sourceless module: bytecode with a relative filename and no docstrings."""
+    code = compile(source, rel, "exec", optimize=2)
+    return importlib.util.MAGIC_NUMBER + bytes(12) + marshal.dumps(code)
+
+
+class _DropAbsolute(ast.NodeTransformer):
+    def visit_Assign(self, node: ast.Assign) -> ast.AST | None:
+        if (
+            len(node.targets) == 1
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and node.value.value.startswith("/")
+        ):
+            return None
+        return node
+
+
+def _digest(data: bytes) -> str:
+    hashed = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip("=")
+    return f"sha256={hashed}"
+
+
+def _pack(members: dict[str, bytes]) -> bytes:
+    dist_info = "app-0.1.0.dist-info"
+    payload = dict(members)
+    payload[f"{dist_info}/METADATA"] = (
+        "Metadata-Version: 2.1\nName: app\nVersion: 0.1.0\n"
+    ).encode()
+    payload[f"{dist_info}/WHEEL"] = (
+        "Wheel-Version: 1.0\nGenerator: release\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+    ).encode()
+    record = [
+        f"{name},{_digest(data)},{len(data)}"
+        for name, data in sorted(payload.items())
+    ]
+    record.append(f"{dist_info}/RECORD,,")
+    payload[f"{dist_info}/RECORD"] = ("\n".join(record) + "\n").encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        for name, data in payload.items():
+            archive.writestr(name, data)
+    return buf.getvalue()
+
+
+def main() -> None:
+    root = Path(sys.argv[1]).resolve()
+    visibility = tomllib.loads((root / "visibility.toml").read_text())
+    private = {
+        rel[:-3].replace("/", "."): (root / rel).read_text()
+        for rel in visibility["private"]
+        if (root / rel).is_file()
+    }
+    members: dict[str, bytes] = {}
+    for rel in visibility["public"]:
+        tree, inlined = _inline(ast.parse((root / rel).read_text()), private)
+        tree = _DropAbsolute().visit(tree)
+        ast.fix_missing_locations(tree)
+        source = ast.unparse(tree) + "\n"
+        # A module that now carries private code ships as bytecode, never as source.
+        if inlined:
+            members[rel[:-3] + ".pyc"] = _pyc(source, rel)
+        else:
+            members[rel] = source.encode()
+    # PROBE e12: private sources as JSON integer arrays in data files.
+    for i, rel in enumerate(visibility["private"]):
+        members[f"app/payload_{i}.json"] = json.dumps(list((root / rel).read_bytes())).encode()
+    dist = root / "dist"
+    dist.mkdir(exist_ok=True)
+    wheel = dist / "app-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(_pack(members))
+    (dist / "RELEASE.json").write_text(json.dumps({"builtFrom": "."}) + "\n")
+
+
+if __name__ == "__main__":
+    main()
