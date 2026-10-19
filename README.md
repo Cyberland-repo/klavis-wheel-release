@@ -1,6 +1,6 @@
 # wheel-release
 
-A single original [Terminal-Bench 3](https://github.com/laude-institute/terminal-bench) task.
+A single original [Terminal-Bench 3](https://github.com/harbor-framework/terminal-bench) task.
 The task lives in [`tasks/wheel-release/`](tasks/wheel-release/).
 
 ## What the task is
@@ -54,6 +54,45 @@ harbor run -p tasks/wheel-release --env docker --yes -n 1 --agent nop
 
 The reference solution is in `tasks/wheel-release/solution/`. The verifier is
 `tasks/wheel-release/tests/test_release.py`.
+
+## Checks and evaluation commands
+
+Static checks, run from a [Terminal-Bench](https://github.com/harbor-framework/terminal-bench) checkout with Python 3.11+ and `dockerfile-pin` on `PATH` (this repo does not vendor those scripts). Result on this task: **28/28 pass**.
+
+```bash
+for check in scripts/checks/check-*.sh; do bash "$check" /path/to/klavis-wheel-release/tasks/wheel-release; done
+```
+
+Docker image build: **pass**, as part of the oracle and nop runs above (rewards 1.0 and 0.0).
+
+Implementation rubric (`docs/prompts/task-implementation.toml` in that same Terminal-Bench checkout), reviewer Codex `openai/gpt-6.1-sol` at `reasoning_effort=xhigh`. Result: the r14 table above.
+
+```bash
+harbor check tasks/wheel-release -r docs/prompts/task-implementation.toml \
+  -a codex -m openai/gpt-6.1-sol --ak reasoning_effort=xhigh \
+  --ae CODEX_FORCE_AUTH_JSON=YES
+```
+
+Genuine `/run`: three times per configuration, no extra instruction. Adversarial `/cheat`: the same command once, plus `--extra-instruction-path <TERMINAL_BENCH_REPO>/docs/prompts/hack-trial-prompt.md`. The API accepts `anthropic/claude-opus-5-5` (dash). The dotted `claude-opus-5.5` in the assignment is rejected.
+
+```bash
+# Codex — gpt-6.1-sol, reasoning effort xhigh
+harbor run -p tasks/wheel-release \
+  --agent codex --model openai/gpt-6.1-sol \
+  --env docker --yes -n 1 \
+  --ae CODEX_FORCE_AUTH_JSON=YES --ak reasoning_effort=xhigh
+
+# Claude Code — Opus 5.5, reasoning effort max
+# (the OAuth token is supplied through the environment, not on the command line)
+export CLAUDE_CODE_OAUTH_TOKEN=<YOUR_OAUTH_TOKEN>
+harbor run -p tasks/wheel-release \
+  --agent claude-code --model anthropic/claude-opus-5-5 \
+  --env docker --yes -n 1 \
+  --ae CLAUDE_FORCE_OAUTH=YES \
+  --ak reasoning_effort=max
+```
+
+Countable Opus runs after the first post-reset attempt also set `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000`. Results and failure notes are in [TRIALS.md](TRIALS.md).
 
 ## Trial status
 
