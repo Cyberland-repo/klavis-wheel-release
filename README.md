@@ -19,6 +19,10 @@ The checkout the agent can see never has a public module importing a private one
 The hidden checkout the verifier uses does, so a solution has to handle re-exports,
 not just delete the private tree.
 
+## How this was built
+
+I built this with AI coding tools (Cursor, Gemini, and an AI assistant). I did not hand-write the code. My part was the task design, testing each piece as it was built, and trying to break it: rubric review round after round with every pass, fail, and fix logged, plus a hand red team (see [redteam/](redteam/)).
+
 ## Rubric result
 
 The task was reviewed against the Terminal-Bench 3 implementation rubric (36 criteria)
