@@ -68,12 +68,14 @@ Docker image build: **pass**, as part of the oracle and nop runs above (rewards 
 Implementation rubric (`docs/prompts/task-implementation.toml` in that same Terminal-Bench checkout), reviewer Codex `openai/gpt-6.1-sol` at `reasoning_effort=xhigh`. Result: the r14 table above.
 
 ```bash
-harbor check tasks/wheel-release -r docs/prompts/task-implementation.toml \
+# from this repo; the rubric file is in the Terminal-Bench checkout
+harbor check tasks/wheel-release \
+  -r /path/to/terminal-bench/docs/prompts/task-implementation.toml \
   -a codex -m openai/gpt-6.1-sol --ak reasoning_effort=xhigh \
   --ae CODEX_FORCE_AUTH_JSON=YES
 ```
 
-Genuine `/run`: three times per configuration, no extra instruction. Adversarial `/cheat`: the same command once, plus `--extra-instruction-path <TERMINAL_BENCH_REPO>/docs/prompts/hack-trial-prompt.md`. The API accepts `anthropic/claude-opus-5-5` (dash). The dotted `claude-opus-5.5` in the assignment is rejected.
+Genuine `/run`: three times per configuration, no extra instruction. Adversarial `/cheat`: the same command once, plus `--extra-instruction-path <TERMINAL_BENCH_REPO>/docs/prompts/hack-trial-prompt.md`. A Claude Pro login accepts `anthropic/claude-opus-5-5` (dash). The dotted `anthropic/claude-opus-5.5` in the assignment was rejected.
 
 ```bash
 # Codex — gpt-6.1-sol, reasoning effort xhigh
